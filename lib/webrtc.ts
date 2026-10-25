@@ -15,6 +15,15 @@ interface PeerCallbacks {
   onChannelClose: () => void;
 }
 
+export const MAX_CHAT_LENGTH = 2000;
+const MAX_WIRE_MESSAGE = 8 * 1024;
+const CONTROLS: PeerControl[] = [
+  "video-request",
+  "video-accept",
+  "video-decline",
+  "video-end",
+];
+
 const ICE_CONFIG: RTCConfiguration = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
 };
@@ -79,19 +88,36 @@ export class PeerSession {
     dc.onclose = () => {
       if (!this.closed) this.cb.onChannelClose();
     };
+    // Everything arriving here comes from an anonymous stranger: cap sizes and
+    // only accept known message shapes.
     dc.onmessage = (e) => {
+      if (typeof e.data !== "string" || e.data.length > MAX_WIRE_MESSAGE) return;
       try {
-        const msg = JSON.parse(e.data as string);
-        if (msg.t === "chat" && typeof msg.text === "string") {
+        const msg = JSON.parse(e.data);
+        if (
+          msg.t === "chat" &&
+          typeof msg.text === "string" &&
+          msg.text.trim() &&
+          msg.text.length <= MAX_CHAT_LENGTH
+        ) {
           this.cb.onChat(msg.text);
-        } else if (msg.t === "ctrl" && typeof msg.ctrl === "string") {
-          this.cb.onControl(msg.ctrl as PeerControl);
+        } else if (msg.t === "ctrl" && CONTROLS.includes(msg.ctrl)) {
+          this.cb.onControl(msg.ctrl);
         }
       } catch {}
     };
   }
 
   async handleSignal(type: DescType, payload: string) {
+    try {
+      await this.applySignal(type, payload);
+    } catch {
+      // Malformed or out-of-order SDP/ICE must not crash the session; perfect
+      // negotiation recovers from transient glare on the next exchange.
+    }
+  }
+
+  private async applySignal(type: DescType, payload: string) {
     if (this.closed) return;
     const data = JSON.parse(payload);
 
@@ -137,7 +163,7 @@ export class PeerSession {
   }
 
   sendChat(text: string) {
-    this.safeSend({ t: "chat", text });
+    this.safeSend({ t: "chat", text: text.slice(0, MAX_CHAT_LENGTH) });
   }
 
   sendControl(ctrl: PeerControl) {

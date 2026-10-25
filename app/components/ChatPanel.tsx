@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { MAX_CHAT_LENGTH } from "@/lib/webrtc";
 import { PhoneOffIcon, SendIcon, ShieldIcon, VideoIcon } from "./icons";
 
 export interface ChatMessage {
@@ -8,8 +9,6 @@ export interface ChatMessage {
   mine: boolean;
   text: string;
 }
-
-const MAX_LEN = 2000;
 
 export default function ChatPanel({
   messages,
@@ -165,7 +164,7 @@ export default function ChatPanel({
           onChange={(e) => setDraft(e.target.value)}
           placeholder={connected ? "Write something kind…" : "Connecting…"}
           disabled={!connected}
-          maxLength={MAX_LEN}
+          maxLength={MAX_CHAT_LENGTH}
           aria-label="Message"
           className="h-12 flex-1 rounded-full border border-line bg-white/[0.04] px-5 text-[15px] text-fg outline-none transition placeholder:text-faint focus:border-pulse/50 focus:bg-white/[0.06] disabled:opacity-50"
         />

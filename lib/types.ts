@@ -20,7 +20,6 @@ export interface PeerDot {
 export interface SignalMsg {
   id: string;
   fromId: string;
-  toId: string;
   type: SignalType;
   payload: string | null;
   createdAt: string;
