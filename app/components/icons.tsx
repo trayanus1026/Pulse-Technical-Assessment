@@ -102,3 +102,17 @@ export const InfoIcon = (p: IconProps) => (
     <path d="M12 11v5M12 8h.01" />
   </Icon>
 );
+
+export const EyeIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" />
+    <circle cx="12" cy="12" r="3" />
+  </Icon>
+);
+
+export const VeilIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M4 10c2.5 2.5 5.2 3.5 8 3.5s5.5-1 8-3.5" />
+    <path d="m6.5 12.6-1.6 2.4M12 13.5V16.5M17.5 12.6l1.6 2.4" />
+  </Icon>
+);

@@ -10,7 +10,8 @@ export const dynamic = "force-dynamic";
 // GET /api/poll — the single endpoint that drives the live map. Authenticated
 // by the session token, so only the owner can drain their own mailbox.
 // It (1) heartbeats the caller, (2) reaps stale presence + orphan signals,
-// (3) returns the filtered online peers, and (4) drains this user's mailbox.
+// (3) returns the filtered online peers plus the live conversation "threads"
+// between them, and (4) drains this user's mailbox.
 export async function GET(request: NextRequest) {
   const me = await findSession(bearerToken(request));
   // Unknown token: the session was reaped (e.g. the tab was throttled) or
@@ -72,6 +73,20 @@ export async function GET(request: NextRequest) {
     });
   }
 
+  // Threads: every pair that is mutually connected right now (both rows point
+  // at each other, so a half-finished accept never draws a line). Pairings
+  // are already implied by the public busy flag; this just says which two.
+  const partnerOf = new Map<string, string | null>(
+    peers.map((p) => [p.id, p.peerId]),
+  );
+  partnerOf.set(me.id, me.peerId);
+  const threads: [string, string][] = [];
+  for (const [id, partner] of partnerOf) {
+    if (partner && id < partner && partnerOf.get(partner) === id) {
+      threads.push([id, partner]);
+    }
+  }
+
   const response: PollResponse = {
     peers: peers.map((p) => ({
       id: p.id,
@@ -79,6 +94,7 @@ export async function GET(request: NextRequest) {
       lng: p.lng,
       busy: p.peerId !== null,
     })),
+    threads,
     signals: inbox.map((s) => ({
       id: s.id,
       fromId: s.fromId,

@@ -2,10 +2,15 @@
 
 import { useEffect, useRef, useState } from "react";
 import "mapbox-gl/dist/mapbox-gl.css";
-import type { Map as MapboxMap, Marker } from "mapbox-gl";
+import type {
+  ExpressionSpecification,
+  GeoJSONSource,
+  Map as MapboxMap,
+  Marker,
+} from "mapbox-gl";
 import type { PeerDot } from "@/lib/types";
 import { peerColor, peerHue } from "@/lib/color";
-import { distanceKm, formatDistance } from "@/lib/geo";
+import { distanceKm, formatDistance, greatCircle } from "@/lib/geo";
 import { LocateIcon } from "./icons";
 
 const TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
@@ -14,14 +19,101 @@ const prefersReducedMotion = () =>
   typeof window !== "undefined" &&
   window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+// Live threads: a glowing great-circle line between every pair of strangers
+// talking right now, with a spark of light travelling along it. Three line
+// layers share one GeoJSON source: a soft glow, a crisp core, and the
+// animated spark (a moving line-gradient, hence lineMetrics).
+const THREADS = "threads";
+const SPARK_COLOR = "rgba(255, 255, 255, 0.95)";
+const CLEAR = "rgba(255, 255, 255, 0)";
+const SPARK_PERIOD_MS = 2600;
+const SPARK_TAIL = 0.22;
+
+type LatLng = { lat: number; lng: number };
+
+// A conversation that just started elsewhere, announced briefly.
+export interface ThreadTicker {
+  key: string;
+  text: string;
+  ends: [LatLng, LatLng];
+}
+
+type ThreadCollection = GeoJSON.FeatureCollection<
+  GeoJSON.LineString,
+  { color: string; mine: boolean }
+>;
+
+function addThreadLayers(map: MapboxMap) {
+  map.addSource(THREADS, {
+    type: "geojson",
+    lineMetrics: true,
+    data: { type: "FeatureCollection", features: [] },
+  });
+  const mine: ExpressionSpecification = ["get", "mine"];
+  const layout = { "line-cap": "round", "line-join": "round" } as const;
+  map.addLayer({
+    id: "threads-glow",
+    type: "line",
+    source: THREADS,
+    layout,
+    paint: {
+      "line-color": ["get", "color"],
+      "line-width": ["case", mine, 16, 10],
+      "line-blur": 8,
+      "line-opacity": ["case", mine, 0.7, 0.45],
+      "line-emissive-strength": 1,
+    },
+  });
+  map.addLayer({
+    id: "threads-core",
+    type: "line",
+    source: THREADS,
+    layout,
+    paint: {
+      "line-color": ["get", "color"],
+      "line-width": ["case", mine, 2, 1.2],
+      "line-opacity": ["case", mine, 0.95, 0.65],
+      "line-emissive-strength": 1,
+    },
+  });
+  map.addLayer({
+    id: "threads-spark",
+    type: "line",
+    source: THREADS,
+    layout,
+    paint: {
+      "line-width": ["case", mine, 3.5, 2.5],
+      "line-gradient": sparkGradient(0),
+      "line-emissive-strength": 1,
+    },
+  });
+}
+
+// A short bright head at `head` (0-1 along each line) fading out behind it.
+function sparkGradient(head: number): ExpressionSpecification {
+  const stops: [number, string][] = [[0, CLEAR]];
+  const tail = head - SPARK_TAIL;
+  if (tail > 0) stops.push([tail, CLEAR]);
+  if (head > 0) stops.push([head, SPARK_COLOR]);
+  if (head + 0.01 < 1) stops.push([head + 0.01, CLEAR]);
+  if (stops[stops.length - 1][0] < 1) stops.push([1, CLEAR]);
+  return ["interpolate", ["linear"], ["line-progress"], ...stops.flat()];
+}
+
 export default function WorldMap({
   peers,
+  threads,
+  myId,
+  ticker,
   me,
   onPeerClick,
   canConnect,
   activePeerId,
 }: {
   peers: PeerDot[];
+  threads: [string, string][];
+  myId: string | null;
+  ticker: ThreadTicker | null;
   me: { lat: number; lng: number } | null;
   onPeerClick: (id: string) => void;
   canConnect: boolean;
@@ -32,6 +124,8 @@ export default function WorldMap({
   const markersRef = useRef<Map<string, Marker>>(new Map());
   const meMarkerRef = useRef<Marker | null>(null);
   const [ready, setReady] = useState(false);
+  const threadCountRef = useRef(0);
+  const framedThreadRef = useRef<string | null>(null);
 
   // Marker click handlers are bound once, so read the live click handler
   // through a ref (synced in an effect, never during render).
@@ -75,6 +169,7 @@ export default function WorldMap({
       });
       map.on("load", () => {
         if (cancelled) return;
+        addThreadLayers(map);
         setReady(true);
         if (me) {
           map.flyTo({
@@ -195,6 +290,91 @@ export default function WorldMap({
     };
   }, [peers, ready, me, canConnect, activePeerId]);
 
+  // Redraw the threads whenever pairings or positions change.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const byId = new Map(peers.map((p) => [p.id, p]));
+    const locate = (id: string) => (id === myId ? me : byId.get(id));
+
+    const data: ThreadCollection = { type: "FeatureCollection", features: [] };
+    for (const [a, b] of threads) {
+      const from = locate(a);
+      const to = locate(b);
+      if (!from || !to) continue;
+      const mine = a === myId || b === myId;
+      data.features.push({
+        type: "Feature",
+        properties: {
+          // Our own thread takes our partner's colour, matching their dot and
+          // the chat header; everyone else's glows in Pulse mint.
+          color: mine ? peerColor(a === myId ? b : a) : "#7cffc4",
+          mine,
+        },
+        geometry: { type: "LineString", coordinates: greatCircle(from, to) },
+      });
+    }
+    threadCountRef.current = data.features.length;
+    (map.getSource(THREADS) as GeoJSONSource | undefined)?.setData(data);
+
+    // When our own conversation starts, pull back to show both ends of it:
+    // the moment you see the line reach across the world is the point.
+    const ours = threads.find(([a, b]) => a === myId || b === myId);
+    const key = ours ? ours.join(":") : null;
+    if (key && key !== framedThreadRef.current) {
+      const partner = byId.get(ours![0] === myId ? ours![1] : ours![0]);
+      if (me && partner) void frame([me, partner], true);
+    }
+    framedThreadRef.current = key;
+  },[threads, peers, me, myId, ready]);
+
+  // Run the spark along every thread. Throttled to ~30fps and idle while
+  // there's nothing to animate; skipped entirely for reduced motion.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready || prefersReducedMotion()) return;
+    let frame = 0;
+    let last = 0;
+    const loop = (now: number) => {
+      frame = requestAnimationFrame(loop);
+      if (threadCountRef.current === 0 || now - last < 33) return;
+      last = now;
+      // Overshoot so the tail fully leaves the line before the next lap.
+      const t = (now % SPARK_PERIOD_MS) / SPARK_PERIOD_MS;
+      const head = Math.min(t * (1 + SPARK_TAIL), 1);
+      if (map.getLayer("threads-spark")) {
+        map.setPaintProperty("threads-spark", "line-gradient", sparkGradient(head));
+      }
+    };
+    frame = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(frame);
+  }, [ready]);
+
+  // Fit the camera to a great-circle thread. `chatOpen` leaves room for the
+  // chat panel docked on the right on wide screens.
+  async function frame(ends: [LatLng, LatLng], chatOpen = false) {
+    const map = mapRef.current;
+    if (!map) return;
+    const mapboxgl = (await import("mapbox-gl")).default;
+    const coords = greatCircle(ends[0], ends[1]);
+    const bounds = coords.reduce(
+      (b, c) => b.extend(c),
+      new mapboxgl.LngLatBounds(coords[0], coords[0]),
+    );
+    const wide = window.innerWidth >= 768;
+    map.fitBounds(bounds, {
+      padding: {
+        top: 110,
+        bottom: wide ? 90 : Math.round(window.innerHeight * 0.45),
+        left: 60,
+        right: chatOpen && wide ? 460 : 60,
+      },
+      maxZoom: 5,
+      duration: prefersReducedMotion() ? 0 : 2200,
+      essential: true,
+    });
+  }
+
   function recenter() {
     if (!mapRef.current || !me) return;
     mapRef.current.flyTo({
@@ -206,6 +386,7 @@ export default function WorldMap({
   }
 
   const count = peers.length;
+  const live = threads.length;
 
   return (
     <div className="absolute inset-0">
@@ -250,13 +431,41 @@ export default function WorldMap({
               <span className="font-mono font-medium tabular-nums text-fg">
                 {count}
               </span>{" "}
-              {count === 1 ? "stranger" : "strangers"} online
+              online
+              {live > 0 && (
+                <>
+                  {" · "}
+                  <span className="font-mono font-medium tabular-nums text-fg">
+                    {live}
+                  </span>{" "}
+                  {live === 1 ? "live thread" : "live threads"}
+                </>
+              )}
             </span>
           ) : (
             <span>Just you, for now</span>
           )}
         </div>
       </header>
+
+      {ticker && (
+        <div
+          key={ticker.key}
+          role="status"
+          className="glass animate-rise absolute right-4 top-[calc(4rem+env(safe-area-inset-top))] z-10 flex max-w-[calc(100vw-2rem)] items-center gap-2 rounded-full py-1.5 pl-3.5 pr-1.5 text-xs text-muted sm:right-6 sm:top-20"
+        >
+          <span className="h-px w-5 shrink-0 bg-linear-to-r from-transparent to-pulse" />
+          <span className="truncate">{ticker.text}</span>
+          {ready && (
+            <button
+              onClick={() => void frame(ticker.ends)}
+              className="shrink-0 rounded-full bg-white/[0.08] px-2.5 py-1 font-medium text-fg transition hover:bg-pulse hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pulse"
+            >
+              Show me
+            </button>
+          )}
+        </div>
+      )}
 
       {me && ready && (
         <button

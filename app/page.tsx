@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import EntryGate from "./components/EntryGate";
-import WorldMap from "./components/WorldMap";
+import WorldMap, { type ThreadTicker } from "./components/WorldMap";
 import ConnectionPrompt from "./components/ConnectionPrompt";
 import ChatPanel, { type ChatMessage } from "./components/ChatPanel";
 import VideoPanel from "./components/VideoPanel";
@@ -13,7 +13,12 @@ import { PeerSession, type DescType, type PeerControl } from "@/lib/webrtc";
 import { POLL_INTERVAL_MS } from "@/lib/presence";
 import { peerColor } from "@/lib/color";
 import { distanceKm, formatDistance } from "@/lib/geo";
-import { type PeerDot, type SignalMsg, type SignalType } from "@/lib/types";
+import {
+  type PeerDot,
+  type PollResponse,
+  type SignalMsg,
+  type SignalType,
+} from "@/lib/types";
 
 type Conn =
   | { kind: "idle" }
@@ -29,6 +34,11 @@ const REQUEST_TIMEOUT_MS = 30_000;
 export default function Home() {
   const [phase, setPhase] = useState<"gate" | "live">("gate");
   const [peers, setPeers] = useState<PeerDot[]>([]);
+  const [threads, setThreads] = useState<[string, string][]>([]);
+  const [myId, setMyId] = useState<string | null>(null);
+  const [ticker, setTicker] = useState<ThreadTicker | null>(null);
+  const knownThreads = useRef<Set<string> | null>(null);
+  const tickerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [notice, setNotice] = useState<{
     id: number;
@@ -38,6 +48,9 @@ export default function Home() {
   const [requestStartedAt, setRequestStartedAt] = useState(0);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  // Video always starts veiled on both sides; each person unveils themselves.
+  const [veiled, setVeiled] = useState(true);
+  const [remoteVeiled, setRemoteVeiled] = useState(true);
   const [myLocation, setMyLocation] = useState<{ lat: number; lng: number } | null>(
     null,
   );
@@ -81,17 +94,49 @@ export default function Home() {
     return s ? sendSignal(s.token, toId, type, payload) : Promise.resolve(false);
   }
 
+  // Announce a conversation that just started elsewhere on the planet. The
+  // first snapshot is taken silently so arriving doesn't trigger a burst.
+  function announceNewThreads(data: PollResponse) {
+    const known = knownThreads.current;
+    knownThreads.current = new Set(data.threads.map(([a, b]) => `${a}:${b}`));
+    if (!known) return;
+    const me = sessionRef.current?.id;
+    const byId = new Map(data.peers.map((p) => [p.id, p]));
+    for (const [a, b] of data.threads) {
+      const key = `${a}:${b}`;
+      if (known.has(key) || a === me || b === me) continue;
+      const pa = byId.get(a);
+      const pb = byId.get(b);
+      if (!pa || !pb) continue;
+      const span = formatDistance(distanceKm(pa, pb)).replace(" away", " apart");
+      if (tickerTimer.current) clearTimeout(tickerTimer.current);
+      setTicker({
+        key,
+        text: `Two strangers ${span} just started talking`,
+        ends: [pa, pb],
+      });
+      tickerTimer.current = setTimeout(() => setTicker(null), 7000);
+      return;
+    }
+  }
+
   function addMessage(mine: boolean, text: string) {
     setMessages((prev) => [...prev, { id: msgId.current++, mine, text }]);
+  }
+
+  function resetVideo() {
+    setLocalStream(null);
+    setRemoteStream(null);
+    setVeiled(true);
+    setRemoteVeiled(true);
+    setVideo("none");
   }
 
   function teardown(message?: string, tone: ToastTone = "info") {
     if (requestTimer.current) clearTimeout(requestTimer.current);
     peerRef.current?.close();
     peerRef.current = null;
-    setLocalStream(null);
-    setRemoteStream(null);
-    setVideo("none");
+    resetVideo();
     setMessages([]);
     setConn({ kind: "idle" });
     if (message) showNotice(message, tone);
@@ -153,9 +198,13 @@ export default function Home() {
         break;
       case "video-end":
         ps?.stopVideo();
-        setLocalStream(null);
-        setRemoteStream(null);
-        setVideo("none");
+        resetVideo();
+        break;
+      case "veil-on":
+        setRemoteVeiled(true);
+        break;
+      case "veil-off":
+        setRemoteVeiled(false);
         break;
     }
   }
@@ -261,9 +310,18 @@ export default function Home() {
     const ps = peerRef.current;
     ps?.stopVideo();
     ps?.sendControl("video-end");
-    setLocalStream(null);
-    setRemoteStream(null);
-    setVideo("none");
+    resetVideo();
+  }
+
+  function toggleVeil() {
+    const ps = peerRef.current;
+    if (!ps) return;
+    const next = !veiled;
+    void ps.setVeiled(next).then((stream) => {
+      if (!stream || peerRef.current !== ps) return;
+      setLocalStream(stream);
+      setVeiled(next);
+    });
   }
 
   function processSignal(sig: SignalMsg) {
@@ -351,9 +409,14 @@ export default function Home() {
             teardown("You were away too long. The conversation ended.", "warn");
           }
           const loc = locationRef.current;
-          if (loc) sessionRef.current = await join(loc.lat, loc.lng);
+          if (loc) {
+            sessionRef.current = await join(loc.lat, loc.lng);
+            setMyId(sessionRef.current.id);
+          }
         } else {
           setPeers(data.peers);
+          setThreads(data.threads);
+          announceNewThreads(data);
           for (const s of data.signals) processSignalRef.current(s);
         }
       } catch {}
@@ -385,6 +448,7 @@ export default function Home() {
 
   async function handleReady(lat: number, lng: number) {
     sessionRef.current = await join(lat, lng);
+    setMyId(sessionRef.current.id);
     locationRef.current = { lat, lng };
     setMyLocation({ lat, lng });
     setPhase("live");
@@ -411,6 +475,9 @@ export default function Home() {
     <main className="fixed inset-0 overflow-hidden bg-ink">
       <WorldMap
         peers={peers}
+        threads={threads}
+        myId={myId}
+        ticker={ticker}
         me={myLocation}
         onPeerClick={requestConnection}
         canConnect={conn.kind === "idle"}
@@ -490,7 +557,7 @@ export default function Home() {
       {video === "incoming" && (
         <ConnectionPrompt
           title="Go face to face?"
-          subtitle="The stranger wants to turn on video. Your camera stays off unless you accept."
+          subtitle="The stranger wants to turn on video. You'll both start veiled, a soft blur, until each of you chooses to unveil."
           color={color}
           variant="video"
           acceptLabel="Turn on video"
@@ -505,6 +572,12 @@ export default function Home() {
           localStream={localStream}
           remoteStream={remoteStream}
           color={color}
+          veiled={veiled}
+          remoteVeiled={remoteVeiled}
+          onToggleVeil={toggleVeil}
+          onTrackEnabled={(kind, on) =>
+            peerRef.current?.setTrackEnabled(kind, on)
+          }
           onEnd={endVideo}
         />
       )}

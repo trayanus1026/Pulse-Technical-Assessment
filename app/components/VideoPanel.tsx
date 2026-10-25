@@ -2,9 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
+  EyeIcon,
   MicIcon,
   MicOffIcon,
   PhoneOffIcon,
+  VeilIcon,
   VideoIcon,
   VideoOffIcon,
 } from "./icons";
@@ -13,11 +15,21 @@ export default function VideoPanel({
   localStream,
   remoteStream,
   color,
+  veiled,
+  remoteVeiled,
+  onToggleVeil,
+  onTrackEnabled,
   onEnd,
 }: {
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
   color: string;
+  // Our own veil (what the stranger receives) and theirs (informational: the
+  // blur is applied on their device, so there's nothing to undo here).
+  veiled: boolean;
+  remoteVeiled: boolean;
+  onToggleVeil: () => void;
+  onTrackEnabled: (kind: "audio" | "video", enabled: boolean) => void;
   onEnd: () => void;
 }) {
   const localRef = useRef<HTMLVideoElement>(null);
@@ -40,13 +52,13 @@ export default function VideoPanel({
   // Muting just disables the local track — no renegotiation needed.
   function toggleMic() {
     const next = !micOn;
-    localStream?.getAudioTracks().forEach((t) => (t.enabled = next));
+    onTrackEnabled("audio", next);
     setMicOn(next);
   }
 
   function toggleCam() {
     const next = !camOn;
-    localStream?.getVideoTracks().forEach((t) => (t.enabled = next));
+    onTrackEnabled("video", next);
     setCamOn(next);
   }
 
@@ -87,6 +99,28 @@ export default function VideoPanel({
         </div>
       )}
 
+      {remoteStream && (
+        <div
+          key={remoteVeiled ? "veiled" : "clear"}
+          className="glass animate-rise pointer-events-none absolute left-1/2 top-[calc(4.5rem+env(safe-area-inset-top))] z-10 flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-2 rounded-full px-4 py-2 text-xs text-muted sm:top-8"
+        >
+          {remoteVeiled ? (
+            <>
+              <VeilIcon width={16} height={16} className="shrink-0 text-fg" />
+              <span className="truncate">
+                The stranger is veiled. They&apos;ll unveil when they&apos;re
+                comfortable.
+              </span>
+            </>
+          ) : (
+            <>
+              <EyeIcon width={16} height={16} className="shrink-0 text-pulse" />
+              <span className="truncate">The stranger unveiled</span>
+            </>
+          )}
+        </div>
+      )}
+
       {/* Top & bottom scrims for legibility over any video */}
       <div className="pointer-events-none absolute inset-x-0 top-0 h-32 bg-linear-to-b from-black/60 to-transparent" />
       <div className="pointer-events-none absolute inset-x-0 bottom-0 h-40 bg-linear-to-t from-black/70 to-transparent" />
@@ -116,6 +150,13 @@ export default function VideoPanel({
             <VideoOffIcon />
           </div>
         )}
+        {/* The self-view is the outgoing stream itself, so this is literally
+            what the stranger sees. */}
+        <span
+          className={`absolute inset-x-1.5 bottom-1.5 rounded-full px-2 py-1 text-center font-mono text-[9px] uppercase tracking-widest backdrop-blur-sm ${veiled ? "bg-black/50 text-fg" : "bg-pulse/90 text-ink"}`}
+        >
+          {veiled ? "Veiled · they see this" : "Visible"}
+        </span>
       </div>
 
       {/* Control dock */}
@@ -135,6 +176,26 @@ export default function VideoPanel({
           className={`${dockBtn} ${camOn ? "bg-white/[0.08] text-fg hover:bg-white/[0.14]" : "bg-fg text-ink"}`}
         >
           {camOn ? <VideoIcon /> : <VideoOffIcon />}
+        </button>
+        <button
+          onClick={onToggleVeil}
+          aria-pressed={!veiled}
+          aria-label={veiled ? "Unveil: show your face clearly" : "Veil: blur your video again"}
+          title={veiled ? "Unveil" : "Veil again"}
+          className={
+            veiled
+              ? "flex h-14 items-center gap-2 rounded-full bg-pulse px-5 font-medium text-ink shadow-[0_10px_30px_-8px_rgb(124_255_196/0.7)] transition hover:brightness-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fg"
+              : `${dockBtn} bg-white/[0.08] text-fg hover:bg-white/[0.14]`
+          }
+        >
+          {veiled ? (
+            <>
+              <EyeIcon />
+              <span className="text-sm">Unveil</span>
+            </>
+          ) : (
+            <VeilIcon />
+          )}
         </button>
         <button
           onClick={onEnd}

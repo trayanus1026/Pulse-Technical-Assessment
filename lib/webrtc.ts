@@ -1,9 +1,14 @@
+import { createVeil, type Veil } from "./veil";
+
 export type DescType = "offer" | "answer" | "ice";
 export type PeerControl =
   | "video-request"
   | "video-accept"
   | "video-decline"
-  | "video-end";
+  | "video-end"
+  // The sender's own veil state, so the other side can explain the blur.
+  | "veil-on"
+  | "veil-off";
 
 interface PeerCallbacks {
   onSignal: (type: DescType, payload: string) => void;
@@ -22,6 +27,8 @@ const CONTROLS: PeerControl[] = [
   "video-accept",
   "video-decline",
   "video-end",
+  "veil-on",
+  "veil-off",
 ];
 
 const ICE_CONFIG: RTCConfiguration = {
@@ -34,7 +41,11 @@ export class PeerSession {
   private readonly polite: boolean;
   private makingOffer = false;
   private ignoreOffer = false;
-  private localStream: MediaStream | null = null;
+  // Raw camera + mic. The camera track is only ever sent once unveiled.
+  private rawStream: MediaStream | null = null;
+  private veil: Veil | null = null;
+  private videoSender: RTCRtpSender | null = null;
+  private veiled = true;
   private closed = false;
   private readonly cb: PeerCallbacks;
   private pendingCandidates: RTCIceCandidateInit[] = [];
@@ -176,22 +187,65 @@ export class PeerSession {
     }
   }
 
+  // Starts the camera *veiled*: WebRTC only ever gets the blurred track until
+  // the user explicitly unveils. Resolves to the stream to show as self-view,
+  // i.e. exactly what the stranger is receiving.
   async startVideo(): Promise<MediaStream> {
-    if (!this.localStream) {
-      this.localStream = await navigator.mediaDevices.getUserMedia({
+    if (!this.rawStream) {
+      const raw = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true,
       });
-      for (const track of this.localStream.getTracks()) {
-        this.pc.addTrack(track, this.localStream);
+      if (this.closed) {
+        for (const track of raw.getTracks()) track.stop();
+        throw new Error("session closed");
       }
+      this.rawStream = raw;
+      const cam = raw.getVideoTracks()[0];
+      this.veil = cam ? createVeil(cam) : null;
+      this.veiled = true;
+      for (const track of raw.getAudioTracks()) this.pc.addTrack(track, raw);
+      if (this.veil) this.videoSender = this.pc.addTrack(this.veil.track, raw);
     }
-    return this.localStream;
+    return this.outgoingStream();
+  }
+
+  // Swaps the outgoing camera track in place (no renegotiation) and tells the
+  // peer. Resolves to the new self-view stream.
+  async setVeiled(veiled: boolean): Promise<MediaStream | null> {
+    const cam = this.rawStream?.getVideoTracks()[0];
+    if (!this.rawStream || !this.veil || !this.videoSender || !cam) return null;
+    if (veiled !== this.veiled) {
+      await this.videoSender.replaceTrack(veiled ? this.veil.track : cam);
+      this.veiled = veiled;
+      this.sendControl(veiled ? "veil-on" : "veil-off");
+    }
+    return this.outgoingStream();
+  }
+
+  // Applied to both the raw and the veiled track so the state survives
+  // swapping between them.
+  setTrackEnabled(kind: "audio" | "video", enabled: boolean) {
+    const tracks =
+      kind === "audio"
+        ? (this.rawStream?.getAudioTracks() ?? [])
+        : [
+            ...(this.rawStream?.getVideoTracks() ?? []),
+            ...(this.veil ? [this.veil.track] : []),
+          ];
+    for (const track of tracks) track.enabled = enabled;
+  }
+
+  private outgoingStream(): MediaStream {
+    const raw = this.rawStream!;
+    const video = this.veiled && this.veil ? this.veil.track : raw.getVideoTracks()[0];
+    return new MediaStream([...(video ? [video] : []), ...raw.getAudioTracks()]);
   }
 
   stopVideo() {
-    if (this.localStream) {
-      for (const track of this.localStream.getTracks()) track.stop();
+    if (this.rawStream) {
+      this.veil?.stop();
+      for (const track of this.rawStream.getTracks()) track.stop();
       for (const sender of this.pc.getSenders()) {
         if (sender.track) {
           try {
@@ -199,7 +253,10 @@ export class PeerSession {
           } catch {}
         }
       }
-      this.localStream = null;
+      this.rawStream = null;
+      this.veil = null;
+      this.videoSender = null;
+      this.veiled = true;
     }
   }
 

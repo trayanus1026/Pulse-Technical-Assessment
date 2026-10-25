@@ -27,5 +27,7 @@ export interface SignalMsg {
 
 export interface PollResponse {
   peers: PeerDot[];
+  // Live conversations as pairs of peer ids (may include the caller's own id).
+  threads: [string, string][];
   signals: SignalMsg[];
 }

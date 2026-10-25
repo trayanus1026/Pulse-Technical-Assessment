@@ -69,3 +69,46 @@ export function isValidLatLng(lat: unknown, lng: unknown): boolean {
     lng <= 180
   );
 }
+
+// Points along the great-circle path from a to b as [lng, lat] pairs — the
+// shortest route over the globe, which is how a thread between two dots
+// should curve. Longitudes are unwrapped (may go past ±180) so a line that
+// crosses the antimeridian stays continuous instead of streaking back across
+// the map.
+export function greatCircle(
+  a: { lat: number; lng: number },
+  b: { lat: number; lng: number },
+  steps = 64,
+): [number, number][] {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const toDeg = (r: number) => (r * 180) / Math.PI;
+  const φ1 = toRad(a.lat);
+  const λ1 = toRad(a.lng);
+  const φ2 = toRad(b.lat);
+  const λ2 = toRad(b.lng);
+  const d = distanceKm(a, b) / 6371; // angular distance
+  // Same point or exact antipodes: no unique great circle, draw it straight.
+  if (d < 1e-6 || Math.sin(d) < 1e-9) {
+    return [
+      [a.lng, a.lat],
+      [b.lng, b.lat],
+    ];
+  }
+
+  const points: [number, number][] = [];
+  let prevLng = a.lng;
+  for (let i = 0; i <= steps; i++) {
+    const f = i / steps;
+    const A = Math.sin((1 - f) * d) / Math.sin(d);
+    const B = Math.sin(f * d) / Math.sin(d);
+    const x = A * Math.cos(φ1) * Math.cos(λ1) + B * Math.cos(φ2) * Math.cos(λ2);
+    const y = A * Math.cos(φ1) * Math.sin(λ1) + B * Math.cos(φ2) * Math.sin(λ2);
+    const z = A * Math.sin(φ1) + B * Math.sin(φ2);
+    let lng = toDeg(Math.atan2(y, x));
+    while (lng - prevLng > 180) lng -= 360;
+    while (lng - prevLng < -180) lng += 360;
+    prevLng = lng;
+    points.push([lng, toDeg(Math.atan2(z, Math.hypot(x, y)))]);
+  }
+  return points;
+}
