@@ -13,10 +13,13 @@ export async function join(
   });
 }
 
-export async function poll(id: string): Promise<PollResponse> {
+// Resolves to null when the server no longer knows this session (its presence
+// row was reaped), signalling the caller to re-join.
+export async function poll(id: string): Promise<PollResponse | null> {
   const res = await fetch(`/api/poll?id=${encodeURIComponent(id)}`, {
     cache: "no-store",
   });
+  if (res.status === 404) return null;
   if (!res.ok) throw new Error(`poll failed: ${res.status}`);
   return res.json();
 }

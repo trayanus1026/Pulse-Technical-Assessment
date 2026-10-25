@@ -5,7 +5,7 @@ import "mapbox-gl/dist/mapbox-gl.css";
 import type { Map as MapboxMap, Marker } from "mapbox-gl";
 import type { PeerDot } from "@/lib/types";
 
-const TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN ?? "pk.eyJ1IjoicHVsc2UtbWFwIiwiYSI6ImNrMDBkZW1vMDAwMDAwMDAifQ.AAAAAAAAAAAAAAAAAAAAAA";
+const TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
 
 function dotColor(id: string): string {
   let hash = 0;
@@ -135,6 +135,9 @@ export default function WorldMap({
             .setLngLat([peer.lng, peer.lat])
             .addTo(map);
           markers.set(peer.id, marker);
+        } else {
+          // A peer that re-joined gets a fresh privacy offset — follow it.
+          marker.setLngLat([peer.lng, peer.lat]);
         }
         marker.getElement().style.opacity = peer.busy ? "0.35" : "1";
       }

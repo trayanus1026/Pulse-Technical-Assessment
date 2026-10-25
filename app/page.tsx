@@ -49,6 +49,7 @@ export default function Home() {
   };
 
   const peerRef = useRef<PeerSession | null>(null);
+  const locationRef = useRef<{ lat: number; lng: number } | null>(null);
   const msgId = useRef(0);
   const requestTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -74,6 +75,13 @@ export default function Home() {
   }
 
   function startPeer(peerId: string, initiator: boolean) {
+    // The peer link dropped without an "end" signal (tab closed, network
+    // failure). Tell the server so both busy flags are cleared, then reset.
+    const lost = (message: string) => {
+      if (peerRef.current !== ps) return;
+      void sendSignal(sessionId, peerId, "end");
+      teardown(message);
+    };
     const ps = new PeerSession(initiator, {
       onSignal: (type: DescType, payload: string) => {
         void sendSignal(sessionId, peerId, type, payload);
@@ -82,13 +90,14 @@ export default function Home() {
       onControl: (ctrl) => handleControl(ctrl),
       onRemoteStream: (stream) => setRemoteStream(stream),
       onConnectionState: (state) => {
-        if (state === "failed") {
-          teardown("Connection failed (network).");
+        if (state === "failed" || state === "closed") {
+          lost("Connection failed (network).");
         }
       },
       onChannelOpen: () => {
         setConn({ kind: "connected", peerId });
       },
+      onChannelClose: () => lost("Stranger disconnected."),
     });
     peerRef.current = ps;
   }
@@ -279,8 +288,15 @@ export default function Home() {
       try {
         const data = await poll(sessionId);
         if (!active) return;
-        setPeers(data.peers);
-        for (const s of data.signals) processSignalRef.current(s);
+        if (!data) {
+          // Our presence row was reaped (e.g. the tab was throttled in the
+          // background past STALE_MS) — re-join so we're visible again.
+          const loc = locationRef.current;
+          if (loc) await join(sessionId, loc.lat, loc.lng);
+        } else {
+          setPeers(data.peers);
+          for (const s of data.signals) processSignalRef.current(s);
+        }
       } catch {}
       if (active) timer = setTimeout(tick, POLL_INTERVAL_MS);
     };
@@ -304,6 +320,7 @@ export default function Home() {
   }, [sessionId, phase]);
 
   async function handleReady(lat: number, lng: number) {
+    locationRef.current = { lat, lng };
     setMyLocation({ lat, lng });
     await join(sessionId, lat, lng);
     setPhase("live");
