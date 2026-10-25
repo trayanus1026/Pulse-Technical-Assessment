@@ -33,6 +33,30 @@ function wrapLng(lng: number): number {
   return ((((lng + 180) % 360) + 360) % 360) - 180;
 }
 
+// Great-circle distance in km (haversine).
+export function distanceKm(
+  a: { lat: number; lng: number },
+  b: { lat: number; lng: number },
+): number {
+  const R = 6371;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+// Human, deliberately coarse distance label. Dots are already offset 1–3 km,
+// so anything under ~10 km is just "nearby".
+export function formatDistance(km: number): string {
+  if (km < 10) return "nearby";
+  if (km < 100) return `~${Math.round(km / 5) * 5} km away`;
+  if (km < 1000) return `~${Math.round(km / 10) * 10} km away`;
+  return `~${(Math.round(km / 100) * 100).toLocaleString()} km away`;
+}
+
 export function isValidLatLng(lat: unknown, lng: unknown): boolean {
   return (
     typeof lat === "number" &&
